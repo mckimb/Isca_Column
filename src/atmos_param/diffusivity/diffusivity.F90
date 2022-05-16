@@ -47,7 +47,7 @@ private
 ! public interfaces
 !=======================================================================
 
- public diffusivity, pbl_depth, molecular_diff
+ public diffusivity, pbl_depth, molecular_diff, diffusivity_lcl
 
 !=======================================================================
 
@@ -122,8 +122,8 @@ character(len=128) :: tagname = '$Name: siena_201211 $'
 
 !  DEFAULT VALUES OF NAMELIST PARAMETERS:
 
-logical :: fixed_depth         = .false.
-real    :: depth_0             =  5000.0
+logical :: fixed_depth         = .false. ! default is .false.
+real    :: depth_0             =  5000.0 ! default is 5000.0
 real    :: frac_inner          =  0.1
 real    :: rich_crit_pbl       =  1.0
 real    :: entr_ratio          =  0.2
@@ -236,7 +236,7 @@ integer :: unit, ierr, io, logunit
   ! initialise from constants
   gcp = grav/cp_air
   d608 = (rvgas-rdgas)/rdgas
-  
+
 !---------- output namelist to log-------------------------------------
 
       if ( mpp_pe() == mpp_root_pe() ) then
@@ -344,6 +344,96 @@ if(background_t.gt.0.0) k_t = max(k_t,background_t)
 
 return
 end subroutine diffusivity
+
+
+subroutine diffusivity_lcl(t, q, u, v, p_full, p_half, z_full, z_half,  &
+                       u_star, b_star, h, ind_lcl, k_m, k_t, kbot)
+real,    intent(in),           dimension(:,:)   :: ind_lcl
+real,    intent(in),           dimension(:,:,:) :: t, q, u, v
+real,    intent(in),           dimension(:,:,:) :: p_full, p_half
+real,    intent(in),           dimension(:,:,:) :: z_full, z_half
+real,    intent(in),           dimension(:,:)   :: u_star, b_star
+real,    intent(inout),        dimension(:,:,:) :: k_m, k_t
+real,    intent(out),          dimension(:,:)   :: h
+integer, intent(in), optional, dimension(:,:)   :: kbot
+
+real, dimension(size(t,1),size(t,2),size(t,3))  :: svcp,z_full_ag, &
+                                                   k_m_save, k_t_save
+real, dimension(size(t,1),size(t,2),size(t,3)+1):: z_half_ag
+real, dimension(size(t,1),size(t,2))            :: z_surf
+integer                                         :: i,j,k,nlev,nlat,nlon
+
+if(.not.module_is_initialized) call diffusivity_init
+
+nlev = size(t,3)
+
+k_m_save = k_m
+k_t_save = k_t
+
+!compute height of surface
+if (present(kbot)) then
+   nlat = size(t,2)
+   nlon = size(t,1)
+   do j=1,nlat
+   do i=1,nlon
+          z_surf(i,j) = z_half(i,j,kbot(i,j)+1)
+   enddo
+   enddo
+else
+   z_surf(:,:) = z_half(:,:,nlev+1)
+end if
+
+
+!compute density profile, and heights relative to surface
+do k = 1, nlev
+  z_full_ag(:,:,k) = z_full(:,:,k) - z_surf(:,:)
+  z_half_ag(:,:,k) = z_half(:,:,k) - z_surf(:,:)
+
+  if(do_simple) then
+    svcp(:,:,k)  =   t(:,:,k) + gcp*(z_full_ag(:,:,k))
+  else
+    svcp(:,:,k)  =   t(:,:,k)*(1. + d608*q(:,:,k)) + gcp*(z_full_ag(:,:,k))
+  endif
+end do
+z_half_ag(:,:,nlev+1) = z_half(:,:,nlev+1) - z_surf(:,:)
+
+
+if(fixed_depth)  then
+   ! h = depth_0
+   ! write(6,*) 'ind_lcl = ', INT(ind_lcl(1,1)) ! INT(kLZBs)
+   h = z_full_ag(1,1,INT(ind_lcl(1,1))) ! convert ind_lcl into a height:
+   ! h = z_half_ag(1,1,INT(ind_lcl)) ! convert ind_lcl into a height:
+   ! write(6,*) 'z_half_ag_lcl', h
+else
+   call pbl_depth(svcp,u,v,z_full_ag,u_star,b_star,h,kbot=kbot)
+end if
+
+if(pbl_mcm) then
+   call diffusivity_pbl_mcm (u,v, t, p_full, p_half, &
+                             z_full_ag, z_half_ag, h, k_m, k_t)
+else
+   call diffusivity_pbl  (svcp, u, v, z_half_ag, h, u_star, b_star,&
+                       k_m, k_t, kbot=kbot)
+end if
+
+if(free_atm_diff) &
+   call diffusivity_free (svcp, u, v, z_full_ag, z_half_ag, h, k_m, k_t)
+
+k_m = k_m + k_m_save
+k_t = k_t + k_t_save
+
+!NOTE THAT THIS LINE MUST FOLLOW DIFFUSIVITY_FREE SO THAT ENTRAINMENT
+!K's DO NOT GET OVERWRITTEN IN DIFFUSIVITY_FREE SUBROUTINE
+if(entr_ratio .gt. 0. .and. .not. fixed_depth .and. do_entrain) &
+    call diffusivity_entr(svcp,z_full_ag,h,u_star,b_star,k_m,k_t)
+
+!set background diffusivities
+if(background_m.gt.0.0) k_m = max(k_m,background_m)
+if(background_t.gt.0.0) k_t = max(k_t,background_t)
+
+
+return
+end subroutine diffusivity_lcl
 
 !=======================================================================
 
@@ -502,8 +592,8 @@ do k = 2, nlev
 
   if(use_pog_bug_fix) then
    ! POG change: avoid possibility of k_m and k_t set to non-zero values above PBL
-   ! due to use of maxval(h_inner) above 
-     where(zm(:,:,k) >= h) 
+   ! due to use of maxval(h_inner) above
+     where(zm(:,:,k) >= h)
        k_m(:,:,k) = 0
        k_t(:,:,k) = 0
      end where
@@ -744,4 +834,3 @@ end subroutine diffusivity_entr
 !=======================================================================
 
 end module diffusivity_mod
-

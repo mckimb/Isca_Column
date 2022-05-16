@@ -12,7 +12,7 @@ use           constants_mod, only: grav, rdgas, rvgas, cp_air, PSTD_MKS, dens_h2
 
 use        time_manager_mod, only: time_type, get_time, operator( + )
 
-use    vert_turb_driver_mod, only: vert_turb_driver_init, vert_turb_driver, vert_turb_driver_end
+use    vert_turb_driver_mod, only: vert_turb_driver_init, vert_turb_driver, vert_turb_driver_lcl, vert_turb_driver_end
 
 use           vert_diff_mod, only: vert_diff_init, gcm_vert_diff_down, gcm_vert_diff_up, vert_diff_end, surf_diff_type
 
@@ -32,13 +32,13 @@ use      dry_convection_mod, only: dry_convection_init, dry_convection
 
 use        diag_manager_mod, only: register_diag_field, send_data
 
-#ifdef COLUMN_MODEL 
+#ifdef COLUMN_MODEL
 use              column_mod, only: get_num_levels, get_surf_geopotential, get_axis_id
-use            spec_mpp_mod, only: get_grid_domain, grid_domain 
+use            spec_mpp_mod, only: get_grid_domain, grid_domain
 #else
 use          transforms_mod, only: get_grid_domain, grid_domain
 use   spectral_dynamics_mod, only: get_axis_id, get_num_levels, get_surf_geopotential
-#endif 
+#endif
 
 use        surface_flux_mod, only: surface_flux, gp_surface_flux
 
@@ -71,10 +71,11 @@ use rayleigh_bottom_drag_mod, only: rayleigh_bottom_drag_init, compute_rayleigh_
 #ifdef SOC_NO_COMPILE
     ! Socrates not included
 #else
+! use socrates_interface_mod
+! use soc_constants_mod
+#endif
 use socrates_interface_mod
 use soc_constants_mod
-#endif
-
 implicit none
 private
 !=================================================================================================================================
@@ -102,7 +103,7 @@ integer, parameter :: UNSET = -1,                & !! are NONE, SIMPLE_BETTS_MIL
                       FULL_BETTS_MILLER_CONV = 2,&
                       DRY_CONV = 3,              &
                       RAS_CONV = 4
-                      
+
 integer :: r_conv_scheme = UNSET  ! the selected convection scheme
 
 logical :: lwet_convection = .false.
@@ -134,10 +135,10 @@ character(len=256) :: land_file_name  = 'INPUT/land.nc'
 character(len=256) :: land_field_name = 'land_mask'
 
 ! RG Add bucket
-logical :: bucket = .false. 
+logical :: bucket = .false.
 integer :: future
 real :: init_bucket_depth = 1000. ! default large value
-real :: init_bucket_depth_land = 20. 
+real :: init_bucket_depth_land = 20.
 real :: max_bucket_depth_land = 0.15 ! default from Manabe 1969
 real :: robert_bucket = 0.04   ! default robert coefficient for bucket depth LJJ
 real :: raw_bucket = 0.53       ! default raw coefficient for bucket depth LJJ
@@ -150,7 +151,7 @@ namelist / idealized_moist_phys_nml / turb, lwet_convection, do_bm, do_ras, roug
                                       land_option, land_file_name, land_field_name,   & !s options for idealised land
                                       land_roughness_prefactor,               &
                                       gp_surface, convection_scheme,          &
-                                      bucket, init_bucket_depth, init_bucket_depth_land, & !RG Add bucket 
+                                      bucket, init_bucket_depth, init_bucket_depth_land, & !RG Add bucket
                                       max_bucket_depth_land, robert_bucket, raw_bucket, &
                                       do_socrates_radiation
 
@@ -220,7 +221,8 @@ real, allocatable, dimension(:,:,:) ::                                        &
      conv_dt_tg,           &   ! temperature tendency from convection
      conv_dt_qg,           &   ! moisture tendency from convection
      cond_dt_tg,           &   ! temperature tendency from condensation
-     cond_dt_qg                ! moisture tendency from condensation
+     cond_dt_qg,           &   ! moisture tendency from condensation
+     total_dt_qg
 
 
 logical, allocatable, dimension(:,:) ::                                       &
@@ -236,10 +238,17 @@ real, allocatable, dimension(:,:) ::                                          &
      klzbs,                &   ! stored level of zero buoyancy values
      cape,                 &   ! convectively available potential energy
      cin,                  &   ! convective inhibition (this and the above are before the adjustment)
+     ! pbl_height,           &   ! pbl height from diffusivity
+!     plcl,                 &   ! lifting condensation level
+!     plzb,                 &   ! level of zero buoyancy
      invtau_q_relaxation,  &   ! temperature relaxation time scale
      invtau_t_relaxation,  &   ! humidity relaxation time scale
      rain,                 &   ! Can be resolved or  parameterised
      snow,                 &   !
+     preslcl,              &   ! added by Brett
+     ind_lcl,              &   ! added by Brett
+     preslzb,              &   ! added by BAM
+     pshallow,             &
      precip                    ! cumulus rain  + resolved rain  + resolved snow
 
 real, allocatable, dimension(:,:,:) :: &
@@ -257,11 +266,25 @@ integer ::           &
      id_diff_dt_qg,  &   ! moisture tendency from vertical diffusion
      id_conv_rain,   &   ! rain from convection
      id_cond_rain,   &   ! rain from condensation
+     id_preslcl,     &   ! pLCL added by Brett
+     id_preslzb,     &   ! pLZB added by BAM
+     id_klzb,        &   ! kLZBs added by BAM
+     id_pbl_height,  &   ! pbl height added by BAM
+     id_pshallow,    &   ! height of shallow convection
+     id_convflag,    &   ! type of convection occurring
+     id_shallower_flag, &   ! frequency of shallow convection
+     id_precip_level_DNE_ktop_flag, & ! frequency of one type of null convection
+     id_precip_level_DNE_flag, & ! frequency of another type of null convection
+     id_deep_gorman_flag,    &   ! frequency of deep convection ogorman scheme
+     id_deep_frierson_flag,    &   ! frequency of deep convection frierson scheme
+     id_noconvflag,  &   ! frequency of no convection
+     id_precip_both_negative_flag,  &  ! frequency of do nothing shallow convection
      id_precip,      &   ! rain and snow from condensation and convection
      id_conv_dt_tg,  &   ! temperature tendency from convection
      id_conv_dt_qg,  &   ! temperature tendency from convection
      id_cond_dt_tg,  &   ! temperature tendency from condensation
      id_cond_dt_qg,  &   ! temperature tendency from condensation
+     id_total_dt_qg, &   ! total temperature tendency
      id_bucket_depth,      &   ! bucket depth variable for output  - RG Add bucket
      id_bucket_depth_conv, &   ! bucket depth variation induced by convection  - RG Add bucket
      id_bucket_depth_cond, &   ! bucket depth variation induced by condensation  - RG Add bucket
@@ -270,7 +293,9 @@ integer ::           &
      id_diss_heat_ray,&  ! Heat dissipated by rayleigh bottom drag if gp_surface=.True.
      id_z_tg,        &   ! Relative humidity
      id_cape,        &
-     id_cin,	     & 	     
+     id_cin,	     &
+!     id_plcl         & ! lifting condensation level
+!     id_plzb        & ! level of zero buoyancy
      id_flux_u,      & ! surface flux of zonal mom.
      id_flux_v,      & ! surface flux of meridional mom.
      id_temp_2m,      & !mp586 for 10m winds and 2m temp
@@ -279,17 +304,17 @@ integer ::           &
      id_q_2m,        & ! Add 2m specific humidity
      id_rh_2m          ! Add 2m relative humidity
 
-integer, allocatable, dimension(:,:) :: convflag ! indicates which qe convection subroutines are used
+integer, allocatable, dimension(:,:) :: convflag, shallower_flag,precip_level_DNE_ktop_flag, precip_level_DNE_flag, deep_gorman_flag, deep_frierson_flag, noconvflag, precip_both_negative_flag ! indicates which qe convection subroutines are used
 real,    allocatable, dimension(:,:) :: rad_lat, rad_lon
 real,    allocatable, dimension(:) :: pref, p_half_1d, ln_p_half_1d, p_full_1d,ln_p_full_1d !s pref is a reference pressure profile, which in 2006 MiMA is just the initial full pressure levels, and an extra level with the reference surface pressure. Others are only necessary to calculate pref.
 real,    allocatable, dimension(:,:) :: capeflag !s Added for Betts Miller scheme (rather than the simplified Betts Miller scheme).
 
 type(surf_diff_type) :: Tri_surf ! used by gcm_vert_diff
-	
-!s initialise constants ready to be used in rh_calc	
+
+!s initialise constants ready to be used in rh_calc
 real :: d622 = 0.
 real :: d378 = 0.
-	
+
 logical :: used, doing_edt, doing_entrain, do_strat
 integer, dimension(4) :: axes
 integer :: is, ie, js, je, num_levels, nsphum, dt_integer
@@ -360,7 +385,7 @@ else if(uppercase(trim(convection_scheme)) == 'SIMPLE_BETTS_MILLER') then
   lwet_convection = .true.
   do_bm           = .false.
   do_ras          = .false.
-  
+
 
 else if(uppercase(trim(convection_scheme)) == 'FULL_BETTS_MILLER') then
   r_conv_scheme = FULL_BETTS_MILLER_CONV
@@ -368,7 +393,7 @@ else if(uppercase(trim(convection_scheme)) == 'FULL_BETTS_MILLER') then
   do_bm           = .true.
   lwet_convection = .false.
   do_ras          = .false.
-  
+
 
 else if(uppercase(trim(convection_scheme)) == 'RAS') then
   r_conv_scheme = RAS_CONV
@@ -382,7 +407,7 @@ else if(uppercase(trim(convection_scheme)) == 'DRY') then
   call error_mesg('idealized_moist_phys','Using dry convection scheme.', NOTE)
   lwet_convection = .false.
   do_bm           = .false.
-  do_ras          = .false.  
+  do_ras          = .false.
 
 else if(uppercase(trim(convection_scheme)) == 'UNSET') then
   call error_mesg('idealized_moist_phys','determining convection scheme from flags', NOTE)
@@ -397,7 +422,7 @@ else if(uppercase(trim(convection_scheme)) == 'UNSET') then
   if (do_ras) then
     r_conv_scheme = RAS_CONV
     call error_mesg('idealized_moist_phys','Using  relaxed Arakawa Schubert convection scheme.', NOTE)
-  end if    
+  end if
 else
   call error_mesg('idealized_moist_phys','"'//trim(convection_scheme)//'"'//' is not a valid convection scheme.'// &
       ' Choices are NONE, SIMPLE_BETTS, FULL_BETTS_MILLER, RAS, DRY', FATAL)
@@ -405,12 +430,12 @@ endif
 
 if(lwet_convection .and. do_bm) &
   call error_mesg('idealized_moist_phys','lwet_convection and do_bm cannot both be .true.',FATAL)
-  
+
 if(lwet_convection .and. do_ras) &
-  call error_mesg('idealized_moist_phys','lwet_convection and do_ras cannot both be .true.',FATAL)  
+  call error_mesg('idealized_moist_phys','lwet_convection and do_ras cannot both be .true.',FATAL)
 
 if(do_bm .and. do_ras) &
-  call error_mesg('idealized_moist_phys','do_bm and do_ras cannot both be .true.',FATAL)  
+  call error_mesg('idealized_moist_phys','do_bm and do_ras cannot both be .true.',FATAL)
 
 nsphum = nhum
 Time_step = Time_step_in
@@ -494,12 +519,26 @@ allocate(coldT        (is:ie, js:je)); coldT = .false.
 allocate(klzbs        (is:ie, js:je))
 allocate(cape         (is:ie, js:je))
 allocate(cin          (is:ie, js:je))
+! allocate(plcl         (is:ie, js:je))
+! allocate(plzb        (is:ie, js:je))
 allocate(invtau_q_relaxation  (is:ie, js:je))
 allocate(invtau_t_relaxation  (is:ie, js:je))
 allocate(rain         (is:ie, js:je)); rain = 0.0
+allocate(preslcl      (is:ie, js:je)); preslcl = 0.0 ! added by Brett
+allocate(ind_lcl      (is:ie, js:je)); ind_lcl = 0.0 ! added by Brett
+allocate(preslzb      (is:ie, js:je)); preslzb = 0.0 ! added by BAM
+allocate(pshallow     (is:ie, js:je)); pshallow = 0.0
 allocate(snow         (is:ie, js:je)); snow = 0.0
 allocate(precip       (is:ie, js:je)); precip = 0.0
-allocate(convflag     (is:ie, js:je))
+allocate(convflag     (is:ie, js:je)); convflag = 0
+allocate(shallower_flag  (is:ie, js:je)); shallower_flag=0
+allocate(precip_level_DNE_ktop_flag (is:ie, js:je)); precip_level_DNE_ktop_flag=0
+allocate(precip_level_DNE_flag (is:ie, js:je)); precip_level_DNE_flag = 0
+allocate(deep_gorman_flag     (is:ie, js:je)); deep_gorman_flag=0
+allocate(deep_frierson_flag     (is:ie, js:je)); deep_frierson_flag=0
+
+allocate(noconvflag   (is:ie, js:je)); noconvflag=0
+allocate(precip_both_negative_flag (is:ie, js:je)); precip_both_negative_flag=0
 allocate(convect      (is:ie, js:je)); convect = .false.
 
 allocate(t_ref (is:ie, js:je, num_levels)); t_ref = 0.0
@@ -599,7 +638,7 @@ if(mixed_layer_bc) then
   t_surf = t_surf_init + 1.0
 
   call mixed_layer_init(is, ie, js, je, num_levels, t_surf, bucket_depth, get_axis_id(), Time, albedo, rad_lonb_2d(:,:), rad_latb_2d(:,:), land, bucket) ! t_surf is intent(inout) !s albedo distribution set here.
-  
+
 elseif(gp_surface) then
   albedo=0.0
   call error_mesg('idealized_moist_phys','Because gp_surface=.True., setting albedo=0.0', NOTE)
@@ -623,6 +662,8 @@ id_cond_dt_qg = register_diag_field(mod_name, 'dt_qg_condensation',        &
      axes(1:3), Time, 'Moisture tendency from condensation','kg/kg/s')
 id_cond_dt_tg = register_diag_field(mod_name, 'dt_tg_condensation',        &
      axes(1:3), Time, 'Temperature tendency from condensation','K/s')
+!id_total_dt_qg = register_diag_field(mod_name, 'dt_qg_total',       &
+!     axes(1:3), Time, 'Moisture tendency total', 'kg/kg/s')
 id_cond_rain = register_diag_field(mod_name, 'condensation_rain',          &
      axes(1:2), Time, 'Rain from condensation','kg/m/m/s')
 id_precip = register_diag_field(mod_name, 'precipitation',          &
@@ -681,7 +722,7 @@ case(RAS_CONV)
         !run without startiform cloud scheme
 
        !---------------------------------------------------------------------
-       !    retrieve the number of registered tracers in order to determine 
+       !    retrieve the number of registered tracers in order to determine
        !    which tracers are to be convectively transported.
        !---------------------------------------------------------------------
 
@@ -693,7 +734,7 @@ case(RAS_CONV)
        do_strat = .false.
 
        !Commented code not used such that tracers are not advected by RAS. Could implement in future.
-       
+
        ! do n=1, num_tracers
        !   if (query_method ('convection', MODEL_ATMOS, n, scheme)) then
        !    num_ras_tracers = num_ras_tracers + 1
@@ -709,13 +750,13 @@ case(RAS_CONV)
 
        !----------------------------------------------------------------------
        !    for each tracer, determine if it is to be transported by convect-
-       !    ion, and the convection schemes that are to transport it. set a 
+       !    ion, and the convection schemes that are to transport it. set a
        !    logical flag to .true. for each tracer that is to be transported by
        !    each scheme and increment the count of tracers to be transported
        !    by that scheme.
        !----------------------------------------------------------------------
 
-        call ras_init (do_strat, axes,Time,tracers_in_ras) 
+        call ras_init (do_strat, axes,Time,tracers_in_ras)
 
 end select
 
@@ -727,6 +768,33 @@ end select
         axes(1:3), Time, 'Temperature tendency from convection','K/s')
    id_conv_rain = register_diag_field(mod_name, 'convection_rain',            &
         axes(1:2), Time, 'Rain from convection','kg/m/m/s')
+   id_total_dt_qg = register_diag_field(mod_name, 'dt_qg_total',       &
+        axes(1:3), Time, 'Moisture tendency total', 'kg/kg/s')
+   id_preslcl = register_diag_field(mod_name, 'pLCL',            &
+        axes(1:2), Time, 'Lifting condensation level','Pa') ! added by Brett
+   id_preslzb = register_diag_field(mod_name, 'pLZB',           &
+        axes(1:2), Time, 'Level of zero buoyancy', 'Pa') ! added by BAM
+   id_klzb = register_diag_field(mod_name, 'kLZB',           &
+        axes(1:2), Time, 'Level of zero buoyancy', 'grid level') ! added by BAM
+   id_pshallow =register_diag_field(mod_name, 'pshallow',           &
+        axes(1:2), Time, 'Height of shallow convection', 'Pa')
+   id_convflag =register_diag_field(mod_name, 'convflag',           &
+        axes(1:2), Time, 'Type of convection', 'No units')
+   id_shallower_flag =register_diag_field(mod_name, 'shallower_flag',           &    axes(1:2), Time, 'Frequency of shallow convection', 'Percentage')
+   id_precip_level_DNE_ktop_flag = register_diag_field(mod_name, 'precip_level_DNE_ktop_flag', & axes(1:2), Time, 'Frequency of one type of null convection', 'Percentage')
+   id_precip_level_DNE_flag = register_diag_field(mod_name, 'precip_level_DNE_flag', & axes(1:2), Time, 'Frequency of one type of null convection', 'Percentage')
+   id_deep_gorman_flag =register_diag_field(mod_name, 'deep_gorman_flag',           &
+        axes(1:2), Time, 'Frequency of deep gorman convection', 'Percentage')
+   id_deep_frierson_flag =register_diag_field(mod_name, 'deep_frierson_flag',           &
+        axes(1:2), Time, 'Frequency of deep frierson convection', 'Percentage')
+   id_noconvflag =register_diag_field(mod_name, 'noconvflag',           &
+        axes(1:2), Time, 'Frequency of no convection', 'Percentage')
+   id_precip_both_negative_flag =register_diag_field(mod_name, 'precip_both_negative_flag',           &
+        axes(1:2), Time, 'Frequency of do nothing shallow convection', 'Percentage')
+!   id_plcl = register_diag_field(mod_name, 'plcl',          &
+!            axes(1:2), Time, 'Lifting condensation level','hPa')
+!   id_plzb = register_diag_field(mod_name, 'plzb',          &
+!                axes(1:2), Time, 'Level of zero buoyancy','hPa')
 !endif
 
 
@@ -772,6 +840,8 @@ if(turb) then
         axes(1:3), Time, 'temperature diffusion tendency','K/s')
    id_diff_dt_qg = register_diag_field(mod_name, 'dt_qg_diffusion',        &
         axes(1:3), Time, 'moisture diffusion tendency','kg/kg/s')
+   id_pbl_height = register_diag_field(mod_name, 'pbl_height',             &
+        axes(1:2), Time, 'boundary layer height', 'm')
 endif
 
    id_rh = register_diag_field ( mod_name, 'rh', &
@@ -780,7 +850,7 @@ endif
 end subroutine idealized_moist_phys_init
 !=================================================================================================================================
 subroutine idealized_moist_phys(Time, p_half, p_full, z_half, z_full, ug, vg, tg, grid_tracers, &
-                                previous, current, dt_ug, dt_vg, dt_tg, dt_tracers, mask, kbot)
+                                previous, current, dt_ug, dt_vg, dt_tg, dt_tracers, dt_qg_convection, dt_tg_convection, mask, kbot)
 
 type(time_type),            intent(in)    :: Time
 real, dimension(:,:,:,:),   intent(in)    :: p_half, p_full, z_half, z_full, ug, vg, tg
@@ -788,9 +858,11 @@ real, dimension(:,:,:,:,:), intent(in)    :: grid_tracers
 integer,                    intent(in)    :: previous, current
 real, dimension(:,:,:),     intent(inout) :: dt_ug, dt_vg, dt_tg
 real, dimension(:,:,:,:),   intent(inout) :: dt_tracers
+real, dimension(:,:,:),     intent(out)   :: dt_qg_convection, dt_tg_convection
+! real, dimension(:,:,:),     intent(out)   :: dt_qg_convection
 
 real :: delta_t
-real, dimension(size(ug,1), size(ug,2), size(ug,3)) :: tg_tmp, qg_tmp, RH,tg_interp, mc, dt_ug_conv, dt_vg_conv
+real, dimension(size(ug,1), size(ug,2), size(ug,3)) :: tg_tmp, qg_tmp, RH,tg_interp, mc, dt_ug_conv, dt_vg_conv, dt_qg_conv
 
 real, intent(in) , dimension(:,:,:), optional :: mask
 integer, intent(in) , dimension(:,:),   optional :: kbot
@@ -809,13 +881,13 @@ if (bucket) then
   filt      = 0.0                ! RG Add bucket
 endif
 
-rain = 0.0; snow = 0.0; precip = 0.0
+rain = 0.0; snow = 0.0; precip = 0.0; preslcl = 0.0; ind_lcl = 0; preslzb = 0.0; pshallow = 0.0; convflag=0; shallower_flag=0; precip_level_DNE_ktop_flag=0; precip_level_DNE_flag=0; deep_frierson_flag=0; deep_gorman_flag=0; noconvflag=0; precip_both_negative_flag=0! added by BAM
 
 select case(r_conv_scheme)
 
 case(SIMPLE_BETTS_CONV)
 
-   call qe_moist_convection ( delta_t,              tg(:,:,:,previous),      &
+   call qe_moist_convection( delta_t,              tg(:,:,:,previous),      &
     grid_tracers(:,:,:,previous,nsphum),        p_full(:,:,:,previous),      &
                           p_half(:,:,:,previous),                coldT,      &
                                  rain,                            snow,      &
@@ -823,7 +895,9 @@ case(SIMPLE_BETTS_CONV)
                                 q_ref,                        convflag,      &
                                 klzbs,                            cape,      &
                                   cin,             invtau_q_relaxation,      &
-                  invtau_t_relaxation,                           t_ref)
+                  invtau_t_relaxation,                           t_ref,      &
+                              preslcl, ind_lcl,                         preslzb,      &
+                             pshallow, shallower_flag, precip_level_DNE_ktop_flag, precip_level_DNE_flag, deep_gorman_flag, deep_frierson_flag, noconvflag, precip_both_negative_flag) ! NTL ADDED preslcl as output ! BAM added preslzb as output
 
    tg_tmp = conv_dt_tg + tg(:,:,:,previous)
    qg_tmp = conv_dt_qg + grid_tracers(:,:,:,previous,nsphum)
@@ -831,15 +905,41 @@ case(SIMPLE_BETTS_CONV)
 
    conv_dt_tg = conv_dt_tg/delta_t
    conv_dt_qg = conv_dt_qg/delta_t
+   dt_qg_convection = conv_dt_qg
+   dt_tg_convection = conv_dt_tg
    depth_change_conv = rain/dens_h2o     ! RG Add bucket
    rain       = rain/delta_t
    precip     = rain
+   !preslcl    = preslcl ! added by Brett !NTL unnecessary
 
    if(id_conv_dt_qg > 0) used = send_data(id_conv_dt_qg, conv_dt_qg, Time)
    if(id_conv_dt_tg > 0) used = send_data(id_conv_dt_tg, conv_dt_tg, Time)
    if(id_conv_rain  > 0) used = send_data(id_conv_rain, rain, Time)
    if(id_cape  > 0) used = send_data(id_cape, cape, Time)
    if(id_cin  > 0) used = send_data(id_cin, cin, Time)
+   if(id_preslcl > 0) used = send_data(id_preslcl, preslcl, Time) ! added by Brett
+   if(id_preslzb > 0) used = send_data(id_preslzb, preslzb, Time) ! added by BAM
+   ! if(id_klzb > 0) used = send_data(id_klzb, tg(1,1,kLZBs,previous), Time) ! added by BAM
+   ! write(6,*) 'id kLZBs = ', INT(kLZBs)
+   ! p_full(:,:,:,previous)
+   if(id_pshallow >0) used = send_data(id_pshallow,pshallow,Time)
+   if(id_convflag >0) used = send_data(id_convflag,real(convflag),Time)
+
+   if(id_shallower_flag>0) used= send_data(id_shallower_flag, real(shallower_flag),Time)
+
+   if(id_precip_level_DNE_ktop_flag>0) used = send_data(id_precip_level_DNE_ktop_flag,real(precip_level_DNE_ktop_flag),Time)
+
+   if(id_precip_level_DNE_flag>0) used = send_data(id_precip_level_DNE_flag, real(precip_level_DNE_flag),Time)
+
+   if(id_deep_gorman_flag >0) used = send_data(id_deep_gorman_flag, real(deep_gorman_flag),Time)
+
+   if(id_deep_frierson_flag >0) used = send_data(id_deep_frierson_flag,real(deep_frierson_flag),Time)
+
+   if(id_noconvflag >0) used = send_data(id_noconvflag, real(noconvflag),Time)
+
+   if(id_precip_both_negative_flag >0) used = send_data(id_precip_both_negative_flag, real(precip_both_negative_flag),Time)
+!   if(id_plcl  > 0) used = send_data(id_plcl, plcl, Time)
+!   if(id_plzb  > 0) used = send_data(id_plzb, plzb, Time)
 
 case(FULL_BETTS_MILLER_CONV)
 
@@ -867,6 +967,8 @@ case(FULL_BETTS_MILLER_CONV)
    if(id_conv_dt_qg > 0) used = send_data(id_conv_dt_qg, conv_dt_qg, Time)
    if(id_conv_dt_tg > 0) used = send_data(id_conv_dt_tg, conv_dt_tg, Time)
    if(id_conv_rain  > 0) used = send_data(id_conv_rain, rain, Time)
+ !  if(id_plcl > 0) used = send_data(id_plcl, plcl, Time)
+ !  if(id_plzb > 0) used = send_data(id_plzb, plzb, Time)
    if(id_cape  > 0) used = send_data(id_cape, cape, Time)
    if(id_cin  > 0) used = send_data(id_cin, cin, Time)
 
@@ -884,19 +986,19 @@ case(DRY_CONV)
 
 case(RAS_CONV)
 
-    call ras   (is,   js,     Time,                                                  &  
+    call ras   (is,   js,     Time,                                                  &
                 tg(:,:,:,previous),   grid_tracers(:,:,:,previous,nsphum),           &
                 ug(:,:,:,previous),  vg(:,:,:,previous),    p_full(:,:,:,previous),  &
                 p_half(:,:,:,previous), z_half(:,:,:,previous), coldT,  delta_t,     &
                 conv_dt_tg,   conv_dt_qg, dt_ug_conv,  dt_vg_conv,                   &
-                rain, snow,   do_strat,                                              &                                              
-                !OPTIONAL 
+                rain, snow,   do_strat,                                              &
+                !OPTIONAL
                 mask,  kbot,                                                         &
                 !OPTIONAL OUT
                 mc,   tracer(:,:,:), tracer(:,:,:),                          &
                tracer(:,:,:),  tracertnd(:,:,:),                             &
                tracertnd(:,:,:), tracertnd(:,:,:))
-                
+
 
       !update tendencies - dT and dq are done after cases
       tg_tmp = tg(:,:,:,previous) + conv_dt_tg
@@ -982,7 +1084,7 @@ if(.not.mixed_layer_bc) then
 end if
 
 
-if(.not.gp_surface) then 
+if(.not.gp_surface) then
   call surface_flux(                                                        &
                   tg(:,:,num_levels,previous),                              &
  grid_tracers(:,:,num_levels,previous,nsphum),                              &
@@ -1031,7 +1133,7 @@ if(.not.gp_surface) then
 			        ex_del_h(:,:),				    & ! mp586 for 10m winds and 2m temp
 			        ex_del_q(:,:),				    & ! mp586 for 10m winds and 2m temp
 			         temp_2m(:,:),				    & ! mp586 for 10m winds and 2m temp
-			           u_10m(:,:),				    & ! mp586 for 10m winds and 2m temp	
+			           u_10m(:,:),				    & ! mp586 for 10m winds and 2m temp
 			           v_10m(:,:),				    & ! mp586 for 10m winds and 2m temp
                                     q_2m(:,:),                              & ! Add 2m specific humidity
                                    rh_2m(:,:),                              & ! Add 2m relative humidity
@@ -1090,7 +1192,7 @@ endif
 #else
 if (do_socrates_radiation) then
        ! Socrates interface
-       
+
     call run_socrates(Time, Time+Time_step, rad_lat, rad_lon, tg(:,:,:,previous), grid_tracers(:,:,:,previous,nsphum), t_surf(:,:), p_full(:,:,:,current), &
                       p_half(:,:,:,current),z_full(:,:,:,current),z_half(:,:,:,current), albedo, dt_tg(:,:,:), net_surf_sw_down(:,:), surf_lw_down(:,:), delta_t)
 
@@ -1100,7 +1202,7 @@ endif
 if(gp_surface) then
 
 	call gp_surface_flux (dt_tg(:,:,:), p_half(:,:,:,current), num_levels)
-	
+
     call compute_rayleigh_bottom_drag( 1,                     ie-is+1, &
                                        1,                     je-js+1, &
                                      Time,                    delta_t, &
@@ -1139,7 +1241,27 @@ endif
 
 if(turb) then
 
-   call vert_turb_driver(            1,                              1, &
+   ! call vert_turb_driver(            1,                              1, &
+   !                                Time,                 Time+Time_step, &
+   !                             delta_t, tdtlw(:,:,:),    fracland(:,:), &
+   !               p_half(:,:,:,current),          p_full(:,:,:,current), &
+   !               z_half(:,:,:,current),          z_full(:,:,:,current), &
+   !                          ustar(:,:),                     bstar(:,:), &
+   !                          qstar(:,:),                     rough(:,:), &
+   !                        rad_lat(:,:),                   convect(:,:), &
+   !                  ug(:,:,:,current ),             vg(:,:,:,current ), &
+   !                  tg(:,:,:,current ),                                 &
+   !  grid_tracers(:,:,:,current,nsphum),  grid_tracers(:,:,:,current,:), &
+   !                  ug(:,:,:,previous),                                 &
+   !                  vg(:,:,:,previous),             tg(:,:,:,previous), &
+   ! grid_tracers(:,:,:,previous,nsphum), grid_tracers(:,:,:,previous,:), &
+   !                        dt_ug(:,:,:),                   dt_vg(:,:,:), &
+   !                        dt_tg(:,:,:),       dt_tracers(:,:,:,nsphum), &
+   !                 dt_tracers(:,:,:,:),                  diff_t(:,:,:), &
+   !                       diff_m(:,:,:),                      gust(:,:), &
+   !                          z_pbl(:,:) )
+
+    call vert_turb_driver_lcl(            1,                              1, &
                                   Time,                 Time+Time_step, &
                                delta_t, tdtlw(:,:,:),    fracland(:,:), &
                  p_half(:,:,:,current),          p_full(:,:,:,current), &
@@ -1157,10 +1279,11 @@ if(turb) then
                           dt_tg(:,:,:),       dt_tracers(:,:,:,nsphum), &
                    dt_tracers(:,:,:,:),                  diff_t(:,:,:), &
                          diff_m(:,:,:),                      gust(:,:), &
-                            z_pbl(:,:) )
+                            z_pbl(:,:),ind_lcl(:,:) )
 
       pbltop(is:ie,js:je) = z_pbl(:,:) !s added so that z_pbl can be used subsequently by damping_driver.
-
+      if(id_pbl_height > 0) used = send_data(id_pbl_height,pbltop, Time)
+      ! if(id_diff_dt_ug > 0) used = send_data(id_diff_dt_ug, dt_ug non_diff_dt_ug, Time)
 !
 !! Don't zero these derivatives as the surface flux depends implicitly
 !! on the lowest level values
@@ -1205,10 +1328,10 @@ if(turb) then
 !
 ! update surface temperature
 !
-   if(mixed_layer_bc) then	
+   if(mixed_layer_bc) then
    call mixed_layer(                                                       &
                               Time, Time+Time_step,                        &
-                              js,                                          & 
+                              js,                                          &
                               je,                                          &
                               t_surf(:,:),                                 & ! t_surf is intent(inout)
                               flux_t(:,:),                                 &
@@ -1233,6 +1356,8 @@ if(turb) then
    if(id_diff_dt_vg > 0) used = send_data(id_diff_dt_vg, dt_vg - non_diff_dt_vg, Time)
    if(id_diff_dt_tg > 0) used = send_data(id_diff_dt_tg, dt_tg - non_diff_dt_tg, Time)
    if(id_diff_dt_qg > 0) used = send_data(id_diff_dt_qg, dt_tracers(:,:,:,nsphum) - non_diff_dt_qg, Time)
+   ! if(id_pbl_height > 0) used = send_data(id_pbl_height,
+   ! pbl_height, Time)
 
 endif ! if(turb) then
 
@@ -1242,8 +1367,8 @@ endif ! if(turb) then
 
 
 ! RG Add bucket
-! Timestepping for bucket. 
-! NB In tapios github, all physics is still in atmosphere.F90 and this leapfrogging is done there. 
+! Timestepping for bucket.
+! NB In tapios github, all physics is still in atmosphere.F90 and this leapfrogging is done there.
 !This part has been included here to avoid editing atmosphere.F90
 ! Therefore define a future variable locally, but do not feedback any changes to timestepping variables upstream, so as to avoid messing with the model's overall timestepping.
 ! Bucket diffusion has been cut for this version - could be incorporated later.
@@ -1258,7 +1383,7 @@ if(bucket) then
 
    ! bucket time tendency
    dt_bucket = depth_change_cond + depth_change_conv - depth_change_lh
-   !change in bucket depth in one leapfrog timestep [m]                                 
+   !change in bucket depth in one leapfrog timestep [m]
 
    ! use the raw filter in leapfrog time stepping
 
@@ -1270,13 +1395,13 @@ if(bucket) then
         *(bucket_depth(:,:,previous) - 2.0*bucket_depth(:,:,current) + bucket_depth(:,:,future)) * raw_bucket
    else
       bucket_depth(:,:,current) = bucket_depth(:,:,current ) + robert_bucket &
-        *(bucket_depth(:,:,previous) - 2.0*bucket_depth(:,:,current)) * raw_bucket 
+        *(bucket_depth(:,:,previous) - 2.0*bucket_depth(:,:,current)) * raw_bucket
       bucket_depth(:,:,future ) = bucket_depth(:,:,previous) + dt_bucket
       bucket_depth(:,:,current) = bucket_depth(:,:,current) + robert_bucket * bucket_depth(:,:,future) * raw_bucket
    endif
 
    bucket_depth(:,:,future) = bucket_depth(:,:,future) + robert_bucket * (filt(:,:) + bucket_depth(:,:, future)) &
-                           * (raw_bucket - 1.0)  
+                           * (raw_bucket - 1.0)
 
    where (bucket_depth <= 0.) bucket_depth = 0.
 
@@ -1293,7 +1418,7 @@ if(bucket) then
 endif
 ! end Add bucket section
 
-
+if (id_total_dt_qg > 0) used= send_data(id_total_dt_qg, dt_tracers(:,:,:,nsphum), Time)
 
 
 end subroutine idealized_moist_phys

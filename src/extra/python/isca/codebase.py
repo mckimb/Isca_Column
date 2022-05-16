@@ -298,7 +298,7 @@ class SocratesCodeBase(CodeBase):
             if link_correct:
                 socrates_code_in_desired_location=True
             else:
-                socrates_code_in_desired_location=False                
+                socrates_code_in_desired_location=False
                 if os.path.islink(socrates_desired_location):
                     self.log.info('Socrates source code symlink is in correct place, but is to incorrect location. Trying to correct.')
                     os.unlink(socrates_desired_location)
@@ -325,7 +325,7 @@ class SocratesCodeBase(CodeBase):
         self.simlink_to_soc_code()
 
 class SocColumnCodeBase(CodeBase):
-    """Isca without RRTM but with the Met Office radiation scheme, Socrates. THIS VERSION FOR SINGLE COLUMN USE. 
+    """Isca without RRTM but with the Met Office radiation scheme, Socrates. THIS VERSION FOR SINGLE COLUMN USE.
     """
     #path_names_file = P(_module_directory, 'templates', 'moist_path_names')
     name = 'socrates_column'
@@ -350,7 +350,7 @@ class SocColumnCodeBase(CodeBase):
             if link_correct:
                 socrates_code_in_desired_location=True
             else:
-                socrates_code_in_desired_location=False                
+                socrates_code_in_desired_location=False
                 if os.path.islink(socrates_desired_location):
                     self.log.info('Socrates source code symlink is in correct place, but is to incorrect location. Trying to correct.')
                     os.unlink(socrates_desired_location)
@@ -419,7 +419,7 @@ class ColumnCodeBase(CodeBase):
     def disable_soc(self):
         # add no compile flag
         self.compile_flags.append('-DSOC_NO_COMPILE')
-        self.log.info('SOCRATES compilations diabled.') 
+        self.log.info('SOCRATES compilations diabled.')
 
     def __init__(self, *args, **kwargs):
         super(ColumnCodeBase, self).__init__(*args, **kwargs)

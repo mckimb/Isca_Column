@@ -18,7 +18,7 @@
 !! along with FMS. if not, see: http://www.gnu.org/licenses/gpl.txt  !!
 !!                                                                   !!
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
- 
+
 module atmosphere_mod
 
 #ifdef INTERNAL_FILE_NML
@@ -42,7 +42,7 @@ use     press_and_geopot_mod, only: compute_pressures_and_heights
                                       get_axis_id, column_diagnostics, get_num_levels, &
                                       get_surf_geopotential, get_initial_fields
   use          column_grid_mod, only: get_deg_lon, get_deg_lat, get_grid_boundaries, &
-                                      get_lon_max, get_lat_max  
+                                      get_lon_max, get_lat_max
 #else
   use    spectral_dynamics_mod, only: spectral_dynamics_init, spectral_dynamics, spectral_dynamics_end, &
                                       get_num_levels, get_axis_id, spectral_diagnostics, get_initial_fields, &
@@ -68,7 +68,7 @@ private
 
 character(len=128) :: version= &
 '$Id: atmosphere.F90,v 19.0.2.1 2013/01/24 14:54:27 pjp Exp $'
-      
+
 character(len=128) :: tagname= &
 '$Name:  $'
 character(len=10), parameter :: mod_name='atmosphere'
@@ -99,6 +99,8 @@ real, allocatable, dimension(:,:,:,:  ) :: ug, vg, tg
 real, allocatable, dimension(:,:    ) :: dt_psg
 real, allocatable, dimension(:,:,:  ) :: dt_ug, dt_vg, dt_tg
 real, allocatable, dimension(:,:,:,:) :: dt_tracers
+real, allocatable, dimension(:,:,:)   :: dt_qg_convection
+real, allocatable, dimension(:,:,:)   :: dt_tg_convection
 
 real, allocatable, dimension(:)   :: deg_lon, deg_lat
 real, allocatable, dimension(:,:) :: rad_lon_2d, rad_lat_2d
@@ -133,7 +135,7 @@ call write_version_number(version, tagname)
 
 #ifdef INTERNAL_FILE_NML
    read (input_nml_file, nml=atmosphere_nml, iostat=io)
-#else  
+#else
    if ( file_exist('input.nml') ) then
       nml_unit = open_namelist_file()
       read (nml_unit, atmosphere_nml, iostat=io)
@@ -156,7 +158,7 @@ allocate (tracer_attributes(num_tracers))
 #else
   call spectral_dynamics_init(Time, Time_step, tracer_attributes, dry_model, nhum)
   column_model = .false.
-#endif 
+#endif
 call get_grid_domain(is, ie, js, je)
 call get_num_levels(num_levels)
 
@@ -176,6 +178,8 @@ allocate (dt_ug      (is:ie, js:je, num_levels))
 allocate (dt_vg      (is:ie, js:je, num_levels))
 allocate (dt_tg      (is:ie, js:je, num_levels))
 allocate (dt_tracers (is:ie, js:je, num_levels, num_tracers))
+allocate (dt_qg_convection (is:ie, js:je, num_levels))
+allocate (dt_tg_convection (is:ie, js:je, num_levels))
 
 allocate (deg_lon    (is:ie       ))
 allocate (rad_lon_2d (is:ie, js:je))
@@ -188,7 +192,7 @@ allocate (rad_latb (js:je+1))
 
 p_half = 0.; z_half = 0.; p_full = 0.; z_full = 0.
 wg_full = 0.; psg = 0.; ug = 0.; vg = 0.; tg = 0.; grid_tracers = 0.
-dt_psg = 0.; dt_ug  = 0.; dt_vg  = 0.; dt_tg  = 0.; dt_tracers = 0.
+dt_psg = 0.; dt_ug  = 0.; dt_vg  = 0.; dt_tg  = 0.; dt_tracers = 0.; dt_qg_convection = 0.; dt_tg_convection = 0.;
 
 allocate (surf_geopotential(is:ie, js:je))
 call get_surf_geopotential(surf_geopotential)
@@ -288,6 +292,8 @@ dt_vg  = 0.0
 dt_tg  = 0.0
 dt_psg = 0.0
 dt_tracers = 0.0
+dt_qg_convection = 0.0
+dt_tg_convection = 0.0
 
 if(current == previous) then
   delta_t = dt_real
@@ -299,7 +305,7 @@ Time_next = Time + Time_step
 
 if(idealized_moist_model) then
    call idealized_moist_phys(Time, p_half, p_full, z_half, z_full, ug, vg, tg, grid_tracers, &
-                             previous, current, dt_ug, dt_vg, dt_tg, dt_tracers)
+                             previous, current, dt_ug, dt_vg, dt_tg, dt_tracers, dt_qg_convection, dt_tg_convection)
 else
    call hs_forcing(1, ie-is+1, 1, je-js+1, delta_t, Time_next, rad_lon_2d, rad_lat_2d, &
                 p_half(:,:,:,current ),       p_full(:,:,:,current   ), &
@@ -320,8 +326,8 @@ endif
 call column(Time, psg(:,:,future), ug(:,:,:,future), vg(:,:,:,future), &
                        tg(:,:,:,future), tracer_attributes, grid_tracers(:,:,:,:,:), future, &
                        dt_psg, dt_ug, dt_vg, dt_tg, dt_tracers, wg_full, &
-                       p_full(:,:,:,current), p_half(:,:,:,current), z_full(:,:,:,current))
-#else 
+                       p_full(:,:,:,current), p_half(:,:,:,current), z_full(:,:,:,current), dt_qg_convection, dt_tg_convection)
+#else
   call spectral_dynamics(Time, psg(:,:,future), ug(:,:,:,future), vg(:,:,:,future), &
                        tg(:,:,:,future), tracer_attributes, grid_tracers(:,:,:,:,:), future, &
                        dt_psg, dt_ug, dt_vg, dt_tg, dt_tracers, wg_full, &
@@ -339,7 +345,7 @@ endif
 
 #ifdef COLUMN_MODEL
 call column_diagnostics(Time_next, psg(:,:,future), ug(:,:,:,future), vg(:,:,:,future), &
-tg(:,:,:,future), wg_full, grid_tracers(:,:,:,:,:), future)
+tg(:,:,:,future), wg_full, grid_tracers(:,:,:,:,:), future,dt_tracers)
 #else
 call spectral_diagnostics(Time_next, psg(:,:,future), ug(:,:,:,future), vg(:,:,:,future), &
                           tg(:,:,:,future), wg_full, grid_tracers(:,:,:,:,:), future)

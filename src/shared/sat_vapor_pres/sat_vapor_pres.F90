@@ -526,9 +526,9 @@ private
 !-----------------------------------------------------------------------
 !  parameters for table size and resolution
 
- integer :: tcmin = -160  ! minimum temperature (degC) in lookup table !Note that this value is overwritten if do_simple = .true.
+ integer :: tcmin = -273  ! minimum temperature (degC) in lookup table !Note that this value is overwritten if do_simple = .true. change from -210 to -273
  integer :: tcmax =  100  ! maximum temperature (degC) in lookup table !Note that this value is overwritten if do_simple = .true.
- integer :: tcmin_simple = -173  ! minimum temperature (degC) in lookup table !Used if do_simple=.true.
+ integer :: tcmin_simple = -273  ! minimum temperature (degC) in lookup table !Used if do_simple=.true. change from -223 to -273
  integer :: tcmax_simple =  350  ! maximum temperature (degC) in lookup table !Used if do_simple=.true.
  integer :: esres =  10   ! table resolution (increments per degree)
  integer :: nsize  ! (tcmax-tcmin)*esres+1    !  lookup table size
@@ -2299,8 +2299,8 @@ real,  intent(in),              optional :: hc
 !  need to initialise here as rdgas not a paramter, so cannot have EPSILO or ZVIR as parameter
  EPSILO = RDGAS/RVGAS
  ZVIR = RVGAS/RDGAS - 1.0
- 
-!----------------------------------------------------------------------- 
+
+!-----------------------------------------------------------------------
 
 
   if(do_simple) then
@@ -2644,4 +2644,3 @@ end module sat_vapor_pres_mod
 !</PRE>
 !   </TESTPROGRAM>
 ! </INFO>
-

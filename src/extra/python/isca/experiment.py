@@ -4,7 +4,7 @@ import re
 from f90nml import Namelist
 from jinja2 import Environment, FileSystemLoader
 import glob
-import sh   
+import sh
 import pdb
 import tarfile
 
@@ -143,6 +143,7 @@ class Experiment(Logger, EventEmitter):
     def write_namelist(self, outdir):
         namelist_file = P(outdir, 'input.nml')
         self.log.info('Writing namelist to %r' % namelist_file)
+        self.namelist.column_width=350
         self.namelist.write(namelist_file)
 
     def write_diag_table(self, outdir):
@@ -392,4 +393,3 @@ class Experiment(Logger, EventEmitter):
 # class RunSpec(Logger):
 #     def __init__(self, exp):
 #         self.exp = exp
-
